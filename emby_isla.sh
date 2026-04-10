@@ -619,6 +619,179 @@ restaurar_backup_emby() {
   show_emby_link
 }
 
+instalar_sqlite_si_falta() {
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    echo -e "${YELLOW}sqlite3 no está instalado. Instalando...${NC}"
+    apt update && apt install -y sqlite3
+  fi
+}
+
+revisar_rutas_emby() {
+  instalar_sqlite_si_falta
+
+  DB="/var/lib/emby/data/library.db"
+
+  if [ ! -f "$DB" ]; then
+    echo -e "${RED}No existe la base de datos: $DB${NC}"
+    return
+  fi
+
+  echo -e "${BLUE}Revisando rutas de Emby...${NC}"
+  echo ""
+
+  EXPECTED_MOUNTS=$(cut -d'|' -f3 "$MOUNT_LIST" | sort -u)
+
+  echo -e "${YELLOW}Rutas raíz detectadas en MediaItems.Path:${NC}"
+  sqlite3 "$DB" "
+    SELECT DISTINCT
+      CASE
+        WHEN Path LIKE '/mnt/%' THEN
+          substr(
+            Path,
+            1,
+            CASE
+              WHEN instr(substr(Path,6),'/') = 0 THEN length(Path)
+              ELSE instr(substr(Path,6),'/') + 4
+            END
+          )
+        ELSE Path
+      END AS RootPath
+    FROM MediaItems
+    WHERE Path IS NOT NULL AND Path != ''
+    ORDER BY RootPath;
+  " | sed '/^$/d'
+
+  echo ""
+  echo -e "${YELLOW}Rutas raíz detectadas en MediaStreams2.Path:${NC}"
+  sqlite3 "$DB" "
+    SELECT DISTINCT
+      CASE
+        WHEN Path LIKE '/mnt/%' THEN
+          substr(
+            Path,
+            1,
+            CASE
+              WHEN instr(substr(Path,6),'/') = 0 THEN length(Path)
+              ELSE instr(substr(Path,6),'/') + 4
+            END
+          )
+        ELSE Path
+      END AS RootPath
+    FROM MediaStreams2
+    WHERE Path IS NOT NULL AND Path != ''
+    ORDER BY RootPath;
+  " | sed '/^$/d'
+
+  echo ""
+  echo -e "${YELLOW}Montajes esperados según el script:${NC}"
+  echo "$EXPECTED_MOUNTS"
+  echo ""
+
+  echo -e "${YELLOW}Rutas de Emby que NO coinciden con mounts esperados:${NC}"
+  sqlite3 "$DB" "
+    WITH roots AS (
+      SELECT DISTINCT
+        CASE
+          WHEN Path LIKE '/mnt/%' THEN
+            substr(
+              Path,
+              1,
+              CASE
+                WHEN instr(substr(Path,6),'/') = 0 THEN length(Path)
+                ELSE instr(substr(Path,6),'/') + 4
+              END
+            )
+          ELSE Path
+        END AS RootPath
+      FROM MediaItems
+      WHERE Path IS NOT NULL AND Path != ''
+      UNION
+      SELECT DISTINCT
+        CASE
+          WHEN Path LIKE '/mnt/%' THEN
+            substr(
+              Path,
+              1,
+              CASE
+                WHEN instr(substr(Path,6),'/') = 0 THEN length(Path)
+                ELSE instr(substr(Path,6),'/') + 4
+              END
+            )
+          ELSE Path
+        END AS RootPath
+      FROM MediaStreams2
+      WHERE Path IS NOT NULL AND Path != ''
+    )
+    SELECT RootPath
+    FROM roots
+    WHERE RootPath NOT IN (
+      '$(cut -d'|' -f3 "$MOUNT_LIST" | paste -sd "','" -)'
+    )
+    ORDER BY RootPath;
+  " | sed '/^$/d'
+
+  echo ""
+  echo -e "${GREEN}Revisión terminada.${NC}"
+}
+
+corregir_rutas_emby() {
+  instalar_sqlite_si_falta
+
+  DB="/var/lib/emby/data/library.db"
+
+  if [ ! -f "$DB" ]; then
+    echo -e "${RED}No existe la base de datos: $DB${NC}"
+    return
+  fi
+
+  echo -e "${RED}ATENCIÓN:${NC} esto modificará rutas dentro de library.db"
+  echo "Se hará copia de seguridad antes."
+  echo ""
+  echo "Ejemplo:"
+  echo "Ruta antigua: /home/PEL"
+  echo "Ruta nueva:   /mnt/01.PEL"
+  echo ""
+  read -r -p "Ruta antigua exacta: " OLD_PATH
+  read -r -p "Ruta nueva exacta: " NEW_PATH
+
+  if [ -z "$OLD_PATH" ] || [ -z "$NEW_PATH" ]; then
+    echo -e "${RED}No puedes dejar rutas vacías.${NC}"
+    return
+  fi
+
+  read -r -p "Escribe SI para continuar: " CONFIRMAR
+  if [ "$CONFIRMAR" != "SI" ]; then
+    echo "Cancelado."
+    return
+  fi
+
+  echo -e "${BLUE}1/5 Parando Emby...${NC}"
+  systemctl stop "$EMBY_SERVICE" 2>/dev/null
+
+  echo -e "${BLUE}2/5 Haciendo backup de library.db...${NC}"
+  cp -a "$DB" "${DB}.backup_$(date +%F_%H-%M-%S)"
+
+  echo -e "${BLUE}3/5 Corrigiendo MediaItems.Path...${NC}"
+  sqlite3 "$DB" "
+    UPDATE MediaItems
+    SET Path = REPLACE(Path, '$OLD_PATH', '$NEW_PATH')
+    WHERE Path LIKE '$OLD_PATH%';
+  "
+
+  echo -e "${BLUE}4/5 Corrigiendo MediaStreams2.Path...${NC}"
+  sqlite3 "$DB" "
+    UPDATE MediaStreams2
+    SET Path = REPLACE(Path, '$OLD_PATH', '$NEW_PATH')
+    WHERE Path LIKE '$OLD_PATH%';
+  "
+
+  echo -e "${BLUE}5/5 Arrancando Emby...${NC}"
+  systemctl start "$EMBY_SERVICE"
+
+  echo -e "${GREEN}Corrección completada.${NC}"
+  echo "Revisa ahora las rutas con la opción de revisión."
+}
+
 load_status
 refresh_status_from_system
 
@@ -644,6 +817,8 @@ while true; do
   echo "15) 📜 Ver logs systemd/watchdog/cron"
   echo "16) 💽 Backup de configuración"
   echo "17) 💾 Restaurar backup aportado de Emby"
+  echo "18) 🧭 Revisar rutas de Emby"
+  echo "19) 🛠️ Corregir rutas de Emby"
   echo "0)  ❌ Salir"
   echo -e "${BLUE}==============================================${NC}"
 
@@ -654,7 +829,7 @@ while true; do
       echo -e "${GREEN}Instalando dependencias...${NC}"
       apt update && apt install -y \
         fuse3 curl wget unzip htop nano git ca-certificates \
-        lsb-release apt-transport-https gnupg python3 tar
+        lsb-release apt-transport-https gnupg python3 tar sqlite3
       DEPENDENCIAS=1
       save_status
       pause
@@ -802,6 +977,16 @@ while true; do
 
     17)
       restaurar_backup_emby
+      pause
+      ;;
+
+    18)
+      revisar_rutas_emby
+      pause
+      ;;
+
+    19)
+      corregir_rutas_emby
       pause
       ;;
 

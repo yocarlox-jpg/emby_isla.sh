@@ -466,6 +466,87 @@ backup_config() {
   echo -e "${GREEN}Backup guardado en:${NC} $DEST"
 }
 
+restaurar_backup_emby() {
+  BACKUP="/root/backup-emby.tar.gz"
+
+  echo -e "${YELLOW}Restaurar backup aportado de Emby${NC}"
+  echo ""
+  echo "Debes subir el archivo a esta ruta exacta:"
+  echo "$BACKUP"
+  echo ""
+
+  if [ ! -f "$BACKUP" ]; then
+    echo -e "${RED}No existe $BACKUP${NC}"
+    return
+  fi
+
+  echo -e "${RED}ATENCIÓN:${NC} se restaurará $BACKUP sobre /var/lib/emby"
+  echo ""
+  echo "¿Quieres guardar una copia previa del Emby actual antes de restaurar?"
+  echo "1) Sí (seguro)"
+  echo "2) No (rápido)"
+  read -r -p "👉 Selecciona: " BACKUP_OPTION
+
+  read -r -p "Escribe SI para continuar: " CONFIRMAR
+  if [ "$CONFIRMAR" != "SI" ]; then
+    echo "Restauración cancelada."
+    return
+  fi
+
+  echo -e "${BLUE}1/6 Comprobando pv...${NC}"
+  if ! command -v pv >/dev/null 2>&1; then
+    echo -e "${YELLOW}pv no está instalado. Instalando automáticamente...${NC}"
+    apt update && apt install -y pv
+    if ! command -v pv >/dev/null 2>&1; then
+      echo -e "${RED}No se pudo instalar pv.${NC}"
+      return
+    fi
+  else
+    echo -e "${GREEN}pv ya está instalado.${NC}"
+  fi
+
+  echo -e "${BLUE}2/6 Parando Emby...${NC}"
+  systemctl stop "$EMBY_SERVICE" 2>/dev/null
+
+  if [ "$BACKUP_OPTION" = "1" ]; then
+    echo -e "${BLUE}3/6 Guardando copia previa de /var/lib/emby...${NC}"
+    echo "Esto puede tardar varios minutos."
+    mkdir -p /root/backup_emby_pre_restore
+    PRE_RESTORE_BACKUP="/root/backup_emby_pre_restore/emby_$(date +%F_%H-%M-%S)"
+    if ! cp -a /var/lib/emby "$PRE_RESTORE_BACKUP" 2>/dev/null; then
+      echo -e "${YELLOW}No se pudo guardar la copia previa o no existía /var/lib/emby.${NC}"
+    else
+      echo -e "${GREEN}Copia previa guardada en:${NC} $PRE_RESTORE_BACKUP"
+    fi
+  else
+    echo -e "${YELLOW}3/6 Saltando copia previa (modo rápido)${NC}"
+  fi
+
+  echo -e "${BLUE}4/6 Limpiando destino...${NC}"
+  rm -rf /var/lib/emby
+  mkdir -p /var/lib/emby
+
+  echo -e "${BLUE}5/6 Restaurando copia aportada con progreso...${NC}"
+  BACKUP_SIZE=$(du -b "$BACKUP" | awk '{print $1}')
+  if ! pv -pterb -s "$BACKUP_SIZE" "$BACKUP" | tar -xzf - -C /; then
+    echo -e "${RED}La restauración ha fallado.${NC}"
+    return
+  fi
+
+  echo -e "${BLUE}6/6 Ajustando permisos y arrancando Emby...${NC}"
+  chown -R emby:emby /var/lib/emby 2>/dev/null
+  systemctl start "$EMBY_SERVICE"
+
+  if systemctl is-active --quiet "$EMBY_SERVICE"; then
+    EMBY_OK=1
+    save_status
+  fi
+
+  echo -e "${GREEN}Restauración completada.${NC}"
+  show_emby_state
+  show_emby_link
+}
+
 load_status
 refresh_status_from_system
 
@@ -489,6 +570,7 @@ while true; do
   echo "13) 🩺 Diagnóstico integral"
   echo "14) 📜 Ver logs systemd/watchdog/cron"
   echo "15) 💽 Backup de configuración"
+  echo "16) 💾 Restaurar backup aportado de Emby"
   echo "0)  ❌ Salir"
   echo -e "${BLUE}==============================================${NC}"
 
@@ -637,6 +719,11 @@ while true; do
 
     15)
       backup_config
+      pause
+      ;;
+
+    16)
+      restaurar_backup_emby
       pause
       ;;
 

@@ -7,7 +7,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 SERVER_NAME="EMBY ISLA"
-EMBY_SERVICE="emby_isla"
+EMBY_SERVICE="emby-server"
 
 CACHE_ROOT="/var/cache/rclone"
 MOUNT_LIST="/root/emby_isla_mounts.tsv"
@@ -138,6 +138,78 @@ create_structure() {
   ESTRUCTURA=1
   save_status
   echo "Estructura creada"
+}
+
+instalar_emby() {
+  echo -e "${GREEN}Buscando última versión válida de Emby...${NC}"
+  cd /root || return 1
+  rm -f /root/emby-server.deb /tmp/emby_releases.json
+
+  API_URL="https://api.github.com/repos/MediaBrowser/Emby.Releases/releases"
+
+  if ! curl -fsSL "$API_URL" -o /tmp/emby_releases.json; then
+    echo -e "${RED}No pude consultar la API de GitHub.${NC}"
+    return 1
+  fi
+
+  if [ ! -s /tmp/emby_releases.json ]; then
+    echo -e "${RED}La respuesta de GitHub está vacía.${NC}"
+    return 1
+  fi
+
+  DEB_URL=$(python3 - << 'PY'
+import json, re
+with open("/tmp/emby_releases.json", "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+def pick_release(releases, allow_prerelease=False):
+    for rel in releases:
+        if rel.get("draft"):
+            continue
+        if not allow_prerelease and rel.get("prerelease"):
+            continue
+        for a in rel.get("assets", []):
+            name = a.get("name", "")
+            url = a.get("browser_download_url", "")
+            if re.search(r"emby-server-deb_.*_amd64\.deb$", name):
+                print(url)
+                return True
+    return False
+
+if not pick_release(data, allow_prerelease=False):
+    pick_release(data, allow_prerelease=True)
+PY
+)
+
+  if [ -z "$DEB_URL" ]; then
+    echo -e "${RED}No encontré ningún .deb amd64 válido.${NC}"
+    return 1
+  fi
+
+  echo "Descargando:"
+  echo "$DEB_URL"
+
+  if ! wget -O /root/emby-server.deb "$DEB_URL"; then
+    echo -e "${RED}La descarga del .deb ha fallado.${NC}"
+    return 1
+  fi
+
+  dpkg -i /root/emby-server.deb || apt -f install -y
+  dpkg -i /root/emby-server.deb
+
+  systemctl enable emby-server
+  systemctl restart emby-server
+  sleep 3
+
+  if systemctl is-active --quiet emby-server; then
+    EMBY_OK=1
+    save_status
+    echo -e "${GREEN}Emby instalado y activo.${NC}"
+    return 0
+  else
+    echo -e "${RED}Emby no arrancó correctamente.${NC}"
+    return 1
+  fi
 }
 
 generate_mount_script() {
@@ -561,16 +633,17 @@ while true; do
   echo "4)  $(checkmark $ESTRUCTURA) 📁 Crear estructura"
   echo "5)  📝 Editar lista de montajes"
   echo "6)  $(checkmark $MOUNTS) ▶️ Montar TODO"
-  echo "7)  $(checkmark $SYSTEMD_OK) ⚙️ Instalar systemd arranque automático"
-  echo "8)  $(checkmark $CRON_OK) 🛡️ Instalar watchdog + cron + reboot cada 2 días"
-  echo "9)  ▶️ Iniciar Emby + mostrar enlace"
-  echo "10) ♻️ Reiniciar Emby"
-  echo "11) 📊 Estado rápido"
-  echo "12) 🔍 Comprobar montajes"
-  echo "13) 🩺 Diagnóstico integral"
-  echo "14) 📜 Ver logs systemd/watchdog/cron"
-  echo "15) 💽 Backup de configuración"
-  echo "16) 💾 Restaurar backup aportado de Emby"
+  echo "7)  $(checkmark $EMBY_OK) 🎬 Instalar/Actualizar Emby"
+  echo "8)  $(checkmark $SYSTEMD_OK) ⚙️ Instalar systemd arranque automático"
+  echo "9)  $(checkmark $CRON_OK) 🛡️ Instalar watchdog + cron + reboot cada 2 días"
+  echo "10) ▶️ Iniciar Emby + mostrar enlace"
+  echo "11) ♻️ Reiniciar Emby"
+  echo "12) 📊 Estado rápido"
+  echo "13) 🔍 Comprobar montajes"
+  echo "14) 🩺 Diagnóstico integral"
+  echo "15) 📜 Ver logs systemd/watchdog/cron"
+  echo "16) 💽 Backup de configuración"
+  echo "17) 💾 Restaurar backup aportado de Emby"
   echo "0)  ❌ Salir"
   echo -e "${BLUE}==============================================${NC}"
 
@@ -644,18 +717,23 @@ while true; do
       ;;
 
     7)
+      instalar_emby
+      pause
+      ;;
+
+    8)
       echo -e "${GREEN}Instalando systemd de arranque automático...${NC}"
       install_systemd_service
       pause
       ;;
 
-    8)
+    9)
       echo -e "${GREEN}Instalando watchdog + cron + reboot cada 2 días a las 04:00...${NC}"
       install_cron_and_watchdog
       pause
       ;;
 
-    9)
+    10)
       echo -e "${GREEN}Iniciando Emby...${NC}"
       systemctl start "$EMBY_SERVICE"
       sleep 2
@@ -668,7 +746,7 @@ while true; do
       pause
       ;;
 
-    10)
+    11)
       echo -e "${YELLOW}Reiniciando Emby...${NC}"
       systemctl restart "$EMBY_SERVICE"
       sleep 2
@@ -681,7 +759,7 @@ while true; do
       pause
       ;;
 
-    11)
+    12)
       echo -e "${BLUE}Estado rápido${NC}"
       echo ""
       echo "Mounts rclone:"
@@ -702,27 +780,27 @@ while true; do
       pause
       ;;
 
-    12)
+    13)
       check_all_mounts
       pause
       ;;
 
-    13)
+    14)
       full_diagnostic
       pause
       ;;
 
-    14)
+    15)
       show_logs
       pause
       ;;
 
-    15)
+    16)
       backup_config
       pause
       ;;
 
-    16)
+    17)
       restaurar_backup_emby
       pause
       ;;
